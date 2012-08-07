@@ -1,0 +1,277 @@
+#!/usr/bin/env ruby
+require 'fileutils'
+require 'logger'
+require 'net/imap'
+require 'optparse'
+require 'thread'
+require 'time'
+require 'yaml'
+
+require 'rubygems'
+require 'highline/import'
+require 'mail'
+require 'stripe-context'
+
+#############################
+
+module StripeContext
+  module TopLevel
+    include StripeContext::Log::Loggable
+
+    def self.assert(statement, msg=nil, hard=false)
+      return if statement
+
+      msg = msg ? "Assertion Failure: #{msg}" : "Assertion Failure"
+      formatted = "#{msg}\n  #{caller.join("\n  ")}"
+      log_error(formatted)
+      raise msg if hard
+    end
+  end
+end
+
+def assert(*args)
+  StripeContext::TopLevel.assert(*args)
+end
+
+StripeContext::Log::Loggable.init
+
+############################
+
+module GmailFetch
+  class OutOfMessages < StandardError; end
+  class Stop; end
+
+  class Runner
+    include StripeContext::Log::Loggable
+
+    def slice_size
+      100
+    end
+
+    def initialize(username, password=nil)
+      unless password
+        password = ask("Enter your password:  ") {|q| q.echo = '*'}
+      end
+
+      @username = username
+      @password = password
+
+      @queue = Queue.new
+    end
+
+    def db_file
+      path('imap.db')
+    end
+
+    def load_db
+      if File.exists?(db_file)
+        log_ann("Loaded #{db_file}")
+        @db = YAML.load_file(db_file)
+      else
+        log_ann("#{db_file} does not exist; initializing db")
+        @db = {}
+      end
+    end
+
+    def checkpoint_db
+      log_ann('Checkpointing db')
+      StripeContext::FileUtils.atomic_write(db_file) do |f|
+        f.write(YAML.dump(@db))
+      end
+    end
+
+    def login
+      if @imap
+        @imap.logout
+        @imap.disconnect
+      end
+
+      log_ann('Connecting to imap.gmail.com')
+      @imap = Net::IMAP.new('imap.gmail.com', 993, true)
+      log_ann('Authenticating')
+      @imap.login(@username, @password)
+    end
+
+    def select
+      log_ann('Selecting all mail')
+      @imap.select('[Gmail]/All Mail')
+    end
+
+    def path(file)
+      base = File.expand_path(File.join(File.dirname(__FILE__), '..'))
+      File.join(base, file)
+    end
+
+    def max_id
+      @db['max_id'] || 0
+    end
+
+    def update_db(seqno)
+      assert(seqno >= max_id, "Seqno is #{seqno} but max_id is #{max_id}")
+      @db['max_id'] = [max_id, seqno].max
+    end
+
+    def store_message(seqno, contents)
+      parsed = Mail.new(contents)
+      date = parsed.date
+      safe = safe_subject(seqno, parsed)
+
+      folder = path("messages/#{date.year}-#{sprintf('%02d', date.month)}")
+      file = "#{seqno} - #{safe}"
+      assert(!file.include?('/'), "Filename includes a /: #{file}", true)
+      location = File.join(folder, file)
+
+      log_ann("Dumping #{seqno} to #{location}")
+      FileUtils.mkdir_p(folder)
+      File.open(location, 'w') do |f|
+        f.write(contents)
+      end
+    end
+
+    def safe_subject(seqno, parsed)
+      if subject = parsed.subject
+        subject.gsub(/[^\\A-Za-z0-9 ().,_:'"\[\]=!~<>\-]/, '-')
+      else
+        log_warn("No subject for message with seqno #{seqno}")
+        '(no subject)'
+      end
+    end
+
+    def fetch_next_slice
+      slice = (max_fetched+1..max_fetched + slice_size)
+      log_ann("Fetching messages #{slice}")
+      unless result = @imap.fetch(slice, 'RFC822')
+        log_ann("No messages found")
+        raise OutOfMessages # might happen with an empty slice that isn't at the end; be careful
+      end
+
+      update_max_fetched(result[-1].seqno)
+      @queue << result
+      log_ann("Pushed #{result.length} messages onto the queue; updated max_fetched to #{@max_fetched}")
+      result.length
+    end
+
+    def start_storer
+      log_ann("Starting storage thread")
+      Thread.new do
+        begin
+          store_next_slice while true
+        rescue OutOfMessages
+        end
+      end
+    end
+
+    def store_next_slice
+      result = @queue.pop
+      if result.kind_of?(Stop)
+        log_ann('Sentinel receieved; ending')
+        raise OutOfMessages
+      end
+
+      log_ann("Popped #{result.length} messages from the queue (backlog: #{@queue.length})")
+      result.each do |message|
+        seqno = message.seqno
+        contents = message.attr['RFC822']
+
+        store_message(seqno, contents)
+        update_db(seqno)
+      end
+    end
+
+    def update_max_fetched(seqno)
+      assert(seqno >= max_fetched, "Seqno is #{seqno} but max_fetched is #{max_fetched}")
+      @max_fetched = [max_fetched, seqno].max
+    end
+
+    def max_fetched
+      @max_fetched || max_id
+    end
+
+    def run
+      load_db
+      login
+      select
+
+      log_ann("Starting fetch of all slices past #{max_fetched}")
+      @storer = start_storer
+      begin
+        while !@stop
+          benchmark do
+            fetch_next_slice
+          end
+          checkpoint_db
+        end
+      rescue OutOfMessages
+      end
+
+      @queue << Stop.new
+      @storer.join
+
+      checkpoint_db
+    end
+
+    def benchmark(&blk)
+      @db['elapsed'] ||= 0
+      @db['consumed'] ||= 0
+
+      start = Time.now.to_f
+      count = blk.call
+      delta = Time.now.to_f - start
+      @db['elapsed'] += delta
+      @db['consumed'] += count
+
+      records_per_second = @db['consumed'] /@db['elapsed']
+      records_per_day = records_per_second * 24 * 60 * 60
+      estimate = (2000000 - @db['consumed']) / records_per_day
+
+      log_ann("Just fetched #{count} records in #{sprintf('%.02f', delta)}s. Total: #{@db['consumed']} in #{@db['elapsed']}s, for a total of #{sprintf('%.02f', records_per_second)} records per second, or #{records_per_day.to_i} records per day. I estimate #{sprintf('%.02f', estimate)} days remaining to fetch 2M records.")
+    end
+
+    def stop
+      log_ann("Stopping... #{@queue.length} fetch batches remaining to be stored")
+      @stop = true
+    end
+  end
+end
+
+def main
+  Thread.abort_on_exception = true
+
+  options = {}
+  optparse = OptionParser.new do |opts|
+    opts.banner = "Usage: #{$0} [options]"
+
+    opts.on('-v', '--verbosity', 'Verbosity of debugging output') do
+      $log.level -= 1
+    end
+
+    opts.on('-h', '--help', 'Display this message') do
+      puts opts
+      exit(1)
+    end
+  end
+  optparse.parse!
+
+  if ARGV.length != 0
+    puts optparse
+    return 1
+  end
+
+  password = File.read('/tmp/password.txt').strip
+  runner = GmailFetch::Runner.new('gdb@gregbrockman.com', password)
+
+  Signal.trap('INT') do
+    runner.stop
+  end
+  runner.run
+  return 0
+end
+
+if $0 == __FILE__
+  ret = main
+  begin
+    exit(ret)
+  rescue TypeError
+    exit(0)
+  end
+end
