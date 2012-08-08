@@ -9,7 +9,6 @@ require 'yaml'
 
 require 'rubygems'
 require 'highline/import'
-require 'mail'
 require 'stripe-context'
 
 #############################
@@ -112,12 +111,10 @@ module GmailFetch
     end
 
     def store_message(seqno, contents)
-      parsed = Mail.new(contents)
-      date = parsed.date
-      safe = safe_subject(seqno, parsed)
+      safe = seqno
 
-      folder = path("messages/#{date.year}-#{sprintf('%02d', date.month)}")
-      file = "#{seqno} - #{safe}"
+      folder = path("messages/#{seqno / 1000}")
+      file = seqno.to_s
       assert(!file.include?('/'), "Filename includes a /: #{file}", true)
       location = File.join(folder, file)
 
@@ -125,15 +122,6 @@ module GmailFetch
       FileUtils.mkdir_p(folder)
       File.open(location, 'w') do |f|
         f.write(contents)
-      end
-    end
-
-    def safe_subject(seqno, parsed)
-      if subject = parsed.subject
-        subject.gsub(/[^\\A-Za-z0-9 ().,_:'"\[\]=!~<>\-]/, '-')
-      else
-        log_warn("No subject for message with seqno #{seqno}")
-        '(no subject)'
       end
     end
 
