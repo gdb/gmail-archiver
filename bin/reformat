@@ -33,9 +33,11 @@ module GmailArchiver
           next
         end
 
+        # TODO: find the actual number of records
         log_ann("Processing #{dir}")
-        benchmark do
-          process(dir)
+        benchmark(2000000) do
+          actual = process(dir)
+          [actual, 1000]
         end
 
         processed << dir

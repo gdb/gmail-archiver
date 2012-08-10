@@ -19,10 +19,9 @@ module GmailArchiver
       100
     end
 
-    def initialize(username, password, options)
+    def initialize(username, password)
       @username = username
       @password = password
-      @options = options
     end
 
     def db_file
@@ -63,7 +62,7 @@ module GmailArchiver
       assert(!file.include?('/'), "Filename includes a /: #{file}", true)
       location = File.join(folder, file)
 
-      log_ann("Dumping #{uid} to #{location}")
+      log_info("Dumping #{uid} to #{location}")
       FileUtils.mkdir_p(folder)
       File.open(location, 'w') do |f|
         f.write(contents)
@@ -76,11 +75,11 @@ module GmailArchiver
 
       log_ann("Fetching messages #{slice}")
       unless result = @imap.uid_fetch(slice, ['RFC822', 'UID'])
-        if @options[:max_known] && last < @options[:max_known]
-          log_warn("Empty slice found (slice ending at #{last}, max_known is #{@options[:max_known].inspect})")
+        if last < @max_known
+          log_warn("Empty slice found (slice ending at #{last}, max_known is #{@max_known.inspect})")
           result = []
         else
-          log_ann("No messages found (slice ending at #{last}, max_known is #{@options[:max_known].inspect})")
+          log_ann("No messages found (slice ending at #{last}, max_known is #{@max_known.inspect})")
           raise OutOfMessages # might happen with an empty slice that isn't at the end; be careful
         end
       end
@@ -99,23 +98,30 @@ module GmailArchiver
       end
     end
 
+    def find_max_known
+      most_recent = @imap.uid_fetch(-1, 'UID')
+      @max_known = most_recent[0].attr['UID']
+      log_ann("Maximum known UID is #{@max_known}")
+    end
+
     def do_run
       log_ann("Starting fetch of all slices past #{max_id}")
       # @storer = start_storer
       begin
         login
         select
+        find_max_known
 
         while true
-          benchmark do
+          benchmark(@max_known) do
             result = fetch_next_slice
             store_next_slice(result)
-            result.length
+            [result.length, slice_size]
           end
           checkpoint_db
         end
       rescue OutOfMessages
-      rescue EOFError => e # imap lib dying
+      rescue EOFError, IOError, Net::IMAP::ByeResponseError => e # imap lib dying
         log_error("Error; about to sleep and retry", e)
         sleep(10)
         retry
@@ -137,10 +143,6 @@ def main
 
     opts.on('-c', '--cache', 'Enable caching of credentials in /tmp') do
       options[:cache] = true
-    end
-
-    opts.on('-m MAX', '--max-known MAX', 'The largest known UID') do |max|
-      options[:max_known] = Integer(max)
     end
 
     opts.on('-h', '--help', 'Display this message') do
@@ -167,7 +169,7 @@ def main
     File.open('/tmp/password.txt', 'w', 0600) {|f| f.write(username)} if options[:cache]
   end
 
-  runner = GmailArchiver::GmailFetchRunner.new(username, password, :max_known => options[:max_known])
+  runner = GmailArchiver::GmailFetchRunner.new(username, password)
   runner.run
   return 0
 end

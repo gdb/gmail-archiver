@@ -68,21 +68,21 @@ module GmailArchiver
       do_run
     end
 
-    def benchmark(&blk)
+    def benchmark(total, &blk)
       @db['elapsed'] ||= 0
       @db['consumed'] ||= 0
 
       start = Time.now.to_f
-      count = blk.call
+      actual, logical = blk.call
       delta = Time.now.to_f - start
       @db['elapsed'] += delta
-      @db['consumed'] += count
+      @db['consumed'] += logical
 
       records_per_second = @db['consumed'] /@db['elapsed']
       records_per_day = records_per_second * 24 * 60 * 60
-      estimate = (2000000 - @db['consumed']) / records_per_day
+      estimate = (total - @db['consumed']) / records_per_day
 
-      log_ann("Just fetched #{count} records in #{sprintf('%.02f', delta)}s. Total: #{@db['consumed']} in #{@db['elapsed']}s, for a total of #{sprintf('%.02f', records_per_second)} records per second, or #{records_per_day.to_i} records per day. I estimate #{sprintf('%.02f', estimate)} days remaining to fetch 2M records.")
+      log_ann("Just processed #{logical} logical records in #{sprintf('%.02f', delta)}s (actual: #{actual}). Total: #{@db['consumed']} in #{@db['elapsed']}s, for a total of #{sprintf('%.02f', records_per_second)} records per second, or #{records_per_day.to_i} records per day. I estimate #{sprintf('%.02f', estimate)} days remaining to process #{total} logical records.")
     end
   end
 end
