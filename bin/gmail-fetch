@@ -1,82 +1,32 @@
 #!/usr/bin/env ruby
 require 'fileutils'
-require 'logger'
 require 'net/imap'
 require 'optparse'
-require 'thread'
 require 'time'
-require 'yaml'
 
 require 'rubygems'
 require 'highline/import'
-require 'stripe-context'
 
-#############################
+require File.expand_path(File.join(File.dirname(__FILE__), '../lib/gmail-archiver'))
 
-module StripeContext
-  module TopLevel
-    include StripeContext::Log::Loggable
-
-    def self.assert(statement, msg=nil, hard=false)
-      return if statement
-
-      msg = msg ? "Assertion Failure: #{msg}" : "Assertion Failure"
-      formatted = "#{msg}\n  #{caller.join("\n  ")}"
-      log_error(formatted)
-      raise msg if hard
-    end
-  end
-end
-
-def assert(*args)
-  StripeContext::TopLevel.assert(*args)
-end
-
-StripeContext::Log::Loggable.init
-
-############################
-
-module GmailFetch
+module GmailArchiver
   class OutOfMessages < StandardError; end
-  class Stop; end
 
-  class Runner
+  class GmailFetchRunner < AbstractRunner
     include StripeContext::Log::Loggable
 
     def slice_size
       100
     end
 
-    def initialize(username, password=nil)
-      unless password
-        password = ask("Enter your password:  ") {|q| q.echo = '*'}
-      end
-
+    def initialize(username, password, options)
       @username = username
       @password = password
-
-      @queue = Queue.new
+      @options = options
     end
 
     def db_file
       path('imap.db')
-    end
-
-    def load_db
-      if File.exists?(db_file)
-        log_ann("Loaded #{db_file}")
-        @db = YAML.load_file(db_file)
-      else
-        log_ann("#{db_file} does not exist; initializing db")
-        @db = {}
-      end
-    end
-
-    def checkpoint_db
-      log_ann('Checkpointing db')
-      StripeContext::FileUtils.atomic_write(db_file) do |f|
-        f.write(YAML.dump(@db))
-      end
     end
 
     def login
@@ -96,29 +46,24 @@ module GmailFetch
       @imap.select('[Gmail]/All Mail')
     end
 
-    def path(file)
-      base = File.expand_path(File.join(File.dirname(__FILE__), '..'))
-      File.join(base, file)
-    end
-
     def max_id
       @db['max_id'] || 0
     end
 
-    def update_db(seqno)
-      assert(seqno >= max_id, "Seqno is #{seqno} but max_id is #{max_id}")
-      @db['max_id'] = [max_id, seqno].max
+    def update_max_id(uid)
+      assert(uid >= max_id, "Uid is #{uid} but max_id is #{max_id}")
+      @db['max_id'] = [max_id, uid].max
     end
 
-    def store_message(seqno, contents)
-      safe = seqno
+    def store_message(uid, contents)
+      safe = uid
 
-      folder = path("messages/#{seqno / 1000}")
-      file = seqno.to_s
+      folder = path("messages/#{uid / 1000}")
+      file = uid.to_s
       assert(!file.include?('/'), "Filename includes a /: #{file}", true)
       location = File.join(folder, file)
 
-      log_ann("Dumping #{seqno} to #{location}")
+      log_ann("Dumping #{uid} to #{location}")
       FileUtils.mkdir_p(folder)
       File.open(location, 'w') do |f|
         f.write(contents)
@@ -126,112 +71,76 @@ module GmailFetch
     end
 
     def fetch_next_slice
-      slice = (max_fetched+1..max_fetched + slice_size)
+      last = max_id + slice_size
+      slice = (max_id+1..last)
+
       log_ann("Fetching messages #{slice}")
-      unless result = @imap.fetch(slice, 'RFC822')
-        log_ann("No messages found")
-        raise OutOfMessages # might happen with an empty slice that isn't at the end; be careful
+      unless result = @imap.uid_fetch(slice, ['RFC822', 'UID'])
+        if @options[:max_known] && last < @options[:max_known]
+          log_warn("Empty slice found (slice ending at #{last}, max_known is #{@options[:max_known].inspect})")
+          result = []
+        else
+          log_ann("No messages found (slice ending at #{last}, max_known is #{@options[:max_known].inspect})")
+          raise OutOfMessages # might happen with an empty slice that isn't at the end; be careful
+        end
       end
 
-      update_max_fetched(result[-1].seqno)
-      @queue << result
-      log_ann("Pushed #{result.length} messages onto the queue; updated max_fetched to #{@max_fetched}")
-      result.length
+      update_max_id(last)
+      result
     end
 
-    # def start_storer
-    #   log_ann("Starting storage thread")
-    #   Thread.new do
-    #     begin
-    #       store_next_slice while true
-    #     rescue OutOfMessages
-    #     end
-    #   end
-    # end
-
-    def store_next_slice
-      result = @queue.pop
-      if result.kind_of?(Stop)
-        log_ann('Sentinel receieved; ending')
-        raise OutOfMessages
-      end
-
-      log_ann("Popped #{result.length} messages from the queue (backlog: #{@queue.length})")
+    def store_next_slice(result)
+      log_ann("Storing #{result.length} messages")
       result.each do |message|
-        seqno = message.seqno
+        uid = message.attr['UID'].to_i
         contents = message.attr['RFC822']
 
-        store_message(seqno, contents)
-        update_db(seqno)
+        store_message(uid, contents)
       end
     end
 
-    def update_max_fetched(seqno)
-      assert(seqno >= max_fetched, "Seqno is #{seqno} but max_fetched is #{max_fetched}")
-      @max_fetched = [max_fetched, seqno].max
-    end
-
-    def max_fetched
-      @max_fetched || max_id
-    end
-
-    def run
-      load_db
-      login
-      select
-
-      log_ann("Starting fetch of all slices past #{max_fetched}")
+    def do_run
+      log_ann("Starting fetch of all slices past #{max_id}")
       # @storer = start_storer
       begin
-        while !@stop
+        login
+        select
+
+        while true
           benchmark do
-            fetch_next_slice
+            result = fetch_next_slice
+            store_next_slice(result)
+            result.length
           end
-          store_next_slice
           checkpoint_db
         end
       rescue OutOfMessages
+      rescue EOFError => e # imap lib dying
+        log_error("Error; about to sleep and retry", e)
+        sleep(10)
+        retry
       end
 
-      # @queue << Stop.new
-      # @storer.join
-
       checkpoint_db
-    end
-
-    def benchmark(&blk)
-      @db['elapsed'] ||= 0
-      @db['consumed'] ||= 0
-
-      start = Time.now.to_f
-      count = blk.call
-      delta = Time.now.to_f - start
-      @db['elapsed'] += delta
-      @db['consumed'] += count
-
-      records_per_second = @db['consumed'] /@db['elapsed']
-      records_per_day = records_per_second * 24 * 60 * 60
-      estimate = (2000000 - @db['consumed']) / records_per_day
-
-      log_ann("Just fetched #{count} records in #{sprintf('%.02f', delta)}s. Total: #{@db['consumed']} in #{@db['elapsed']}s, for a total of #{sprintf('%.02f', records_per_second)} records per second, or #{records_per_day.to_i} records per day. I estimate #{sprintf('%.02f', estimate)} days remaining to fetch 2M records.")
-    end
-
-    def stop
-      log_ann("Stopping... #{@queue.length} fetch batches remaining to be stored")
-      @stop = true
     end
   end
 end
 
 def main
-  Thread.abort_on_exception = true
-
   options = {}
   optparse = OptionParser.new do |opts|
     opts.banner = "Usage: #{$0} [options]"
 
     opts.on('-v', '--verbosity', 'Verbosity of debugging output') do
       $log.level -= 1
+    end
+
+    opts.on('-c', '--cache', 'Enable caching of credentials in /tmp') do
+      options[:cache] = true
+    end
+
+    opts.on('-m MAX', '--max-known MAX', 'The largest known UID') do |max|
+      options[:max_known] = Integer(max)
     end
 
     opts.on('-h', '--help', 'Display this message') do
@@ -246,8 +155,19 @@ def main
     return 1
   end
 
-  password = File.read('/tmp/password.txt').strip
-  runner = GmailFetch::Runner.new('gdb@gregbrockman.com', password)
+  username = File.read('/tmp/username.txt').strip rescue nil
+  unless username
+    username = ask("Enter your email:  ")
+    File.open('/tmp/username.txt', 'w', 0600) {|f| f.write(username)} if options[:cache]
+  end
+
+  password = File.read('/tmp/password.txt').strip rescue nil
+  unless password
+    password = ask("Enter your password:  ") { |q| q.echo = "*" }
+    File.open('/tmp/password.txt', 'w', 0600) {|f| f.write(username)} if options[:cache]
+  end
+
+  runner = GmailArchiver::GmailFetchRunner.new(username, password, :max_known => options[:max_known])
   runner.run
   return 0
 end

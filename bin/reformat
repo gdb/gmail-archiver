@@ -1,0 +1,129 @@
+#!/usr/bin/env ruby
+require 'fileutils'
+require 'optparse'
+require 'set'
+
+require 'rubygems'
+require 'mail'
+
+require File.expand_path(File.join(File.dirname(__FILE__), '../lib/gmail-archiver'))
+
+module GmailArchiver
+  class ReformatRunner < AbstractRunner
+    include StripeContext::Log::Loggable
+
+    def db_file
+      path('reformat.db')
+    end
+
+    def processed
+      @db['processed'] ||= Set.new
+    end
+
+    def do_run
+      Dir.new(path('messages')).each do |name|
+        unless name =~ /^\d+$/
+          assert(name == '.' || name == '..', "Invalid file: #{name.inspect}", true)
+          next
+        end
+
+        dir = path(File.join('messages', name))
+        if processed.include?(dir)
+          log_ann("Skipping already processed dir #{dir}")
+          next
+        end
+
+        log_ann("Processing #{dir}")
+        benchmark do
+          process(dir)
+        end
+
+        processed << dir
+        checkpoint_db
+      end
+    end
+
+    def process(dir)
+      records = 0
+      Dir.new(dir).each do |id|
+        unless id =~ /^\d+$/
+          assert(id == '.' || id == '..', "Invalid file: #{id.inspect}", true)
+          next
+        end
+
+        contents = File.read(File.join(dir, id))
+        parsed = Mail.new(contents)
+
+        date = parsed.date
+        safe = safe_subject(id, parsed)
+
+        formatted_month = sprintf('%02d', date.month)
+        formatted_year = date.year
+        if formatted_year < 100
+          log_warn("Message #{id} had a year of #{formatted_year}; adding 2000")
+          formatted_year += 2000
+        end
+
+        folder = path("parsed-messages/#{formatted_year}-#{formatted_month}")
+        store_message(id, folder, "#{id}: #{safe}", contents)
+        records += 1
+      end
+      records
+    end
+
+    def safe_subject(id, parsed)
+      if subject = parsed.subject
+        subject.gsub(/[^\\A-Za-z0-9 ().,_:'"\[\]=!~<>\-]/, '-')[0..100]
+      else
+        log_warn("No subject for message #{id}")
+        '(no subject)'
+      end
+    end
+
+    def store_message(id, folder, file, contents)
+      assert(!file.include?('/'), "Filename includes a /: #{file}", true)
+      location = File.join(folder, file)
+
+      log_info("Dumping #{id} to #{location}")
+      FileUtils.mkdir_p(folder)
+      File.open(location, 'w') do |f|
+        f.write(contents)
+      end
+    end
+  end
+end
+
+def main
+  options = {}
+  optparse = OptionParser.new do |opts|
+    opts.banner = "Usage: #{$0} [options]"
+
+    opts.on('-v', '--verbosity', 'Verbosity of debugging output') do
+      $log.level -= 1
+    end
+
+    opts.on('-h', '--help', 'Display this message') do
+      puts opts
+      exit(1)
+    end
+  end
+  optparse.parse!
+
+  if ARGV.length != 0
+    puts optparse
+    return 1
+  end
+
+  runner = GmailArchiver::ReformatRunner.new
+  runner.run
+  return 0
+end
+
+if $0 == __FILE__
+  ret = main
+  begin
+    exit(ret)
+  rescue TypeError
+    exit(0)
+  end
+end
