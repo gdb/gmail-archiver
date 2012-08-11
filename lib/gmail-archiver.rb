@@ -2,6 +2,7 @@ require 'yaml'
 
 require 'rubygems'
 require 'stripe-context'
+require 'highline/import'
 
 #############################
 
@@ -29,6 +30,48 @@ StripeContext::Log::Loggable.init('default_level' => 'WARN')
 ############################
 
 module GmailArchiver
+  def self.get_login_info(cache)
+    username = File.read('/tmp/username.txt').strip rescue nil
+    unless username
+      username = ask("Enter your email:  ")
+      File.open('/tmp/username.txt', 'w', 0600) {|f| f.write(username)} if cache
+    end
+
+    password = File.read('/tmp/password.txt').strip rescue nil
+    unless password
+      password = ask("Enter your password:  ") { |q| q.echo = "*" }
+      File.open('/tmp/password.txt', 'w', 0600) {|f| f.write(username)} if cache
+    end
+
+    [username, password]
+  end
+
+  module IMAP
+    def slice_size
+      100
+    end
+
+    def login
+      if @imap
+        begin
+          @imap.logout
+          @imap.disconnect
+        rescue
+        end
+      end
+
+      log_ann('Connecting to imap.gmail.com')
+      @imap = Net::IMAP.new('imap.gmail.com', 993, true)
+      log_ann('Authenticating')
+      @imap.login(@username, @password)
+    end
+
+    def select
+      log_ann('Selecting all mail')
+      @imap.select('[Gmail]/All Mail')
+    end
+  end
+
   class AbstractRunner
     include StripeContext::Log::Loggable
 

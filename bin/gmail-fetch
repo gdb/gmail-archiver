@@ -6,6 +6,7 @@ require 'time'
 
 require 'rubygems'
 require 'highline/import'
+require 'json'
 
 require File.expand_path(File.join(File.dirname(__FILE__), '../lib/gmail-archiver'))
 
@@ -14,10 +15,7 @@ module GmailArchiver
 
   class GmailFetchRunner < AbstractRunner
     include StripeContext::Log::Loggable
-
-    def slice_size
-      100
-    end
+    include GmailArchiver::IMAP
 
     def initialize(username, password)
       @username = username
@@ -25,27 +23,7 @@ module GmailArchiver
     end
 
     def db_file
-      path('imap.db')
-    end
-
-    def login
-      if @imap
-        begin
-          @imap.logout
-          @imap.disconnect
-        rescue
-        end
-      end
-
-      log_ann('Connecting to imap.gmail.com')
-      @imap = Net::IMAP.new('imap.gmail.com', 993, true)
-      log_ann('Authenticating')
-      @imap.login(@username, @password)
-    end
-
-    def select
-      log_ann('Selecting all mail')
-      @imap.select('[Gmail]/All Mail')
+      path('gmail-fetch.db')
     end
 
     def max_id
@@ -57,7 +35,7 @@ module GmailArchiver
       @db['max_id'] = [max_id, uid].max
     end
 
-    def store_message(uid, contents)
+    def store_message(uid, raw, meta)
       safe = uid
 
       folder = path("messages/#{uid / 1000}")
@@ -67,8 +45,11 @@ module GmailArchiver
 
       log_info("Dumping #{uid} to #{location}")
       FileUtils.mkdir_p(folder)
-      File.open(location, 'w') do |f|
-        f.write(contents)
+      File.open(location + '.eml', 'w') do |f|
+        f.write(raw)
+      end
+      File.open(location + '.meta', 'w') do |f|
+        f.write(JSON.pretty_generate(meta) + "\n")
       end
     end
 
@@ -77,7 +58,7 @@ module GmailArchiver
       slice = (max_id+1..last)
 
       log_ann("Fetching messages #{slice}")
-      unless result = @imap.uid_fetch(slice, ['RFC822', 'UID'])
+      unless result = @imap.uid_fetch(slice, ['RFC822', 'UID', 'X-GM-THRID', 'X-GM-LABELS', 'X-GM-MSGID'])
         if last < @max_known
           log_warn("Empty slice found (slice ending at #{last}, max_known is #{@max_known.inspect})")
           result = []
@@ -94,10 +75,10 @@ module GmailArchiver
     def store_next_slice(result)
       log_ann("Storing #{result.length} messages")
       result.each do |message|
-        uid = message.attr['UID'].to_i
-        contents = message.attr['RFC822']
-
-        store_message(uid, contents)
+        data = message.attr
+        uid = data['UID']
+        contents = data.delete('RFC822')
+        store_message(uid, contents, data)
       end
     end
 
@@ -160,18 +141,7 @@ def main
     return 1
   end
 
-  username = File.read('/tmp/username.txt').strip rescue nil
-  unless username
-    username = ask("Enter your email:  ")
-    File.open('/tmp/username.txt', 'w', 0600) {|f| f.write(username)} if options[:cache]
-  end
-
-  password = File.read('/tmp/password.txt').strip rescue nil
-  unless password
-    password = ask("Enter your password:  ") { |q| q.echo = "*" }
-    File.open('/tmp/password.txt', 'w', 0600) {|f| f.write(username)} if options[:cache]
-  end
-
+  username, password = GmailArchiver.get_login_info(options[:cache])
   runner = GmailArchiver::GmailFetchRunner.new(username, password)
   runner.run
   return 0
