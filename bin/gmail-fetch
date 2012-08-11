@@ -30,8 +30,11 @@ module GmailArchiver
 
     def login
       if @imap
-        @imap.logout
-        @imap.disconnect
+        begin
+          @imap.logout
+          @imap.disconnect
+        rescue
+        end
       end
 
       log_ann('Connecting to imap.gmail.com')
