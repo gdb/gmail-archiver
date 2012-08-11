@@ -1,0 +1,136 @@
+#!/usr/bin/env ruby
+require 'fileutils'
+require 'net/imap'
+require 'optparse'
+require 'time'
+
+require File.expand_path(File.join(File.dirname(__FILE__), '../lib/gmail-archiver'))
+
+module GmailArchiver
+  class GmailDeleteRunner < AbstractRunner
+    include StripeContext::Log::Loggable
+    include GmailArchiver::IMAP
+
+    def initialize(username, password, delete_until)
+      @username = username
+      @password = password
+      @delete_until = delete_until
+    end
+
+    def slice_size
+      1000
+    end
+
+    def db_file
+      path('gmail-delete.db')
+    end
+
+    def max_id
+      @db['max_id'] || 0
+    end
+
+    def update_max_id(uid)
+      assert(uid >= max_id, "Uid is #{uid} but max_id is #{max_id}")
+      @db['max_id'] = [max_id, uid].max
+    end
+
+    def delete_next_slice
+      last = max_id + slice_size
+      slice = (max_id+1..last)
+
+      log_ann("Deleting messages #{slice}")
+      result = @imap.uid_copy(slice, '[Gmail]/Trash')
+
+      update_max_id(last)
+      result
+    end
+
+    def find_max(dir)
+      messages = Dir.entries(File.join(dir))
+      messages.select {|file| file != '.' && file != '..'}.max_by {|a| Integer(a)}
+    end
+
+    def max_known
+      @max_known ||=
+        begin
+          messages_dir = path('messages')
+          max_dir_name = find_max(messages_dir)
+          max_file = find_max(File.join(messages_dir, max_dir_name))
+          max_known = Integer(max_file)
+          log_ann("Maximum known UID is #{max_known}")
+          max_known
+        end
+    end
+
+    def delete_until
+      @delete_until ||= max_known / 2
+    end
+
+    def do_run
+      log_ann("Starting to delete slices past #{max_id} up to #{delete_until} (have downloaded until #{max_known})")
+      # @storer = start_storer
+      begin
+        login
+        select
+
+        while true
+          benchmark(delete_until) do
+            delete_next_slice
+            [slice_size, slice_size]
+          end
+          checkpoint_db
+        end
+      rescue EOFError, IOError, Net::IMAP::ByeResponseError, Net::IMAP::NoResponseError => e # imap lib dying
+        log_error("Error; about to sleep and retry", e)
+        sleep(10)
+        retry
+      end
+
+      checkpoint_db
+    end
+  end
+end
+
+def main
+  options = {}
+  optparse = OptionParser.new do |opts|
+    opts.banner = "Usage: #{$0} [options]"
+
+    opts.on('-v', '--verbosity', 'Verbosity of debugging output') do
+      $log.level -= 1
+    end
+
+    opts.on('-c', '--cache', 'Enable caching of credentials in /tmp') do
+      options[:cache] = true
+    end
+
+    opts.on('-d ID', '--delete-until ID', 'UID of the maximum message to delete to') do |id|
+      options[:delete_until] = id
+    end
+
+    opts.on('-h', '--help', 'Display this message') do
+      puts opts
+      exit(1)
+    end
+  end
+  optparse.parse!
+
+  if ARGV.length != 0
+    puts optparse
+    return 1
+  end
+
+  username, password = GmailArchiver.get_login_info(options[:cache])
+  runner = GmailArchiver::GmailDeleteRunner.new(username, password, options[:delete_until])
+  runner.run
+  return 0
+end
+
+if $0 == __FILE__
+  ret = main
+  begin
+    exit(ret)
+  rescue TypeError
+    exit(0)
+  end
+end
