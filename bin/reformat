@@ -23,11 +23,11 @@ module GmailArchiver
     def do_run
       Dir.new(path('messages')).each do |name|
         unless name =~ /^\d+$/
-          assert(name == '.' || name == '..', "Invalid file: #{name.inspect}", true)
+          assert(name == '.' || name == '..', "Invalid directory: #{name.inspect}", true)
           next
         end
-
         dir = path(File.join('messages', name))
+
         if processed.include?(dir)
           log_ann("Skipping already processed dir #{dir}")
           next
@@ -47,17 +47,18 @@ module GmailArchiver
 
     def process(dir)
       records = 0
-      Dir.new(dir).each do |id|
-        unless id =~ /^\d+$/
-          assert(id == '.' || id == '..', "Invalid file: #{id.inspect}", true)
-          next
-        end
+      Dir.new(dir).each do |name|
+        next unless name.end_with?('.eml')
+        raise "Invalid name: #{name}" unless name =~ /^(\d+)\.eml$/
+        id = $1
 
-        contents = File.read(File.join(dir, id))
+        contents = File.read(File.join(dir, name))
+        meta = File.read(File.join(dir, "#{id}.meta"))
         parsed = Mail.new(contents)
 
         date = parsed.date
         safe = safe_subject(id, parsed)
+        base = "#{id}: #{safe}"
 
         formatted_month = sprintf('%02d', date.month)
         formatted_year = date.year
@@ -67,7 +68,8 @@ module GmailArchiver
         end
 
         folder = path("parsed-messages/#{formatted_year}-#{formatted_month}")
-        store_message(id, folder, "#{id}: #{safe}", contents)
+        store_message(id, folder, "#{base}.eml", contents)
+        store_message(id, folder, "#{base}.meta", meta)
         records += 1
       end
       records
