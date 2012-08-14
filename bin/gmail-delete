@@ -5,9 +5,11 @@ require 'optparse'
 require 'time'
 
 require File.expand_path(File.join(File.dirname(__FILE__), '../lib/gmail-archiver'))
+require 'json'
 
 module GmailArchiver
   class GmailDeleteRunner < AbstractRunner
+    LABEL_WHITELIST = ['To', 'Sent'] # Should really be To Me, but spaces in labels are messed up
     include StripeContext::Log::Loggable
     include GmailArchiver::IMAP
 
@@ -34,29 +36,65 @@ module GmailArchiver
       @db['max_id'] = [max_id, uid].max
     end
 
-    def delete_next_slice
-      last = max_id + slice_size
-      slice = (max_id+1..last)
+    def next_slice(start, stop)
+      slice = (start..stop).select do |i|
+        ok = true
 
-      log_ann("Deleting messages #{slice}")
+        meta = load_meta(i)
+        next unless meta
+        LABEL_WHITELIST.each do |label|
+          if meta["X-GM-LABELS"].include?(label)
+            log_ann("Skipping #{i} because it is labeled #{label}: (#{meta["X-GM-LABELS"].inspect})")
+            ok = false
+            break
+          end
+        end
+
+        ok
+      end
+      slice
+    end
+
+    def load_meta(i)
+      folder = i / 1000
+      base = "messages/#{folder}/#{i}"
+      meta_file = path("#{base}.meta")
+      eml_file = path("#{base}.eml")
+      if File.exists?(meta_file)
+        JSON.load(File.read(meta_file))
+      else
+        raise "Missing meta file" if File.exists?(eml_file)
+        nil
+      end
+    end
+
+    def delete_next_slice
+      start = max_id + 1
+      stop = max_id + slice_size
+      slice = next_slice(start, stop)
+      skipped = (start..stop).to_a - slice
+
+      log_ann("Deleting messages from #{start}-#{stop} except #{skipped.inspect}")
       result = @imap.uid_copy(slice, '[Gmail]/Trash')
 
-      update_max_id(last)
+      update_max_id(stop)
       result
     end
 
     def find_max(dir)
       messages = Dir.entries(File.join(dir))
-      messages.select {|file| file != '.' && file != '..'}.max_by {|a| Integer(a)}
+      messages.select {|file| file != '.' && file != '..'}.map do |a|
+        a =~ /^(\d+?)(\.[a-z]+)?$/
+        Integer($1)
+      end.max
     end
 
     def max_known
       @max_known ||=
         begin
           messages_dir = path('messages')
-          max_dir_name = find_max(messages_dir)
-          max_file = find_max(File.join(messages_dir, max_dir_name))
-          max_known = Integer(max_file)
+          max_dir_number = find_max(messages_dir)
+          max_known = find_max(File.join(messages_dir, max_dir_number.to_s))
           log_ann("Maximum known UID is #{max_known}")
           max_known
         end
