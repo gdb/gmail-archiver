@@ -9,7 +9,7 @@ require 'json'
 
 module GmailArchiver
   class GmailDeleteRunner < AbstractRunner
-    LABEL_WHITELIST = ['To', 'Sent'] # Should really be To Me, but spaces in labels are messed up
+    LABEL_WHITELIST = ['To', 'Sent', 'Important'] # Should really be To Me, but spaces in labels are messed up
     include StripeContext::Log::Loggable
     include GmailArchiver::IMAP
 
