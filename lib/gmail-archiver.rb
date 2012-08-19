@@ -40,7 +40,7 @@ module GmailArchiver
     password = File.read('/tmp/password.txt').strip rescue nil
     unless password
       password = ask("Enter your password:  ") { |q| q.echo = "*" }
-      File.open('/tmp/password.txt', 'w', 0600) {|f| f.write(username)} if cache
+      File.open('/tmp/password.txt', 'w', 0600) {|f| f.write(password)} if cache
     end
 
     [username, password]
