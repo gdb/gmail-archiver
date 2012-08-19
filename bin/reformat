@@ -56,18 +56,24 @@ module GmailArchiver
         meta = File.read(File.join(dir, "#{id}.meta"))
         parsed = Mail.new(contents)
 
-        date = parsed.date
         safe = safe_subject(id, parsed)
         base = "#{id}: #{safe}"
 
-        formatted_month = sprintf('%02d', date.month)
-        formatted_year = date.year
-        if formatted_year < 100
-          log_warn("Message #{id} had a year of #{formatted_year}; adding 2000")
-          formatted_year += 2000
+        if date = parsed.date
+          formatted_month = sprintf('%02d', date.month)
+          formatted_year = date.year
+
+          if formatted_year < 100
+            log_warn("Message #{id} had a year of #{formatted_year}; adding 2000")
+            formatted_year += 2000
+          end
+
+          formatted_date = "#{formatted_year}-#{formatted_month}"
+        else
+          formatted_date = 'unknown'
         end
 
-        folder = path("parsed-messages/#{formatted_year}-#{formatted_month}")
+        folder = path("parsed-messages/#{formatted_date}")
         store_message(id, folder, "#{base}.eml", contents)
         store_message(id, folder, "#{base}.meta", meta)
         records += 1
