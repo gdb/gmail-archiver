@@ -14,7 +14,6 @@ module GmailArchiver
   class OutOfMessages < StandardError; end
 
   class GmailFetchRunner < AbstractRunner
-    include StripeContext::Log::Loggable
     include GmailArchiver::IMAP
 
     def initialize(username, password)
@@ -43,7 +42,7 @@ module GmailArchiver
       assert(!file.include?('/'), "Filename includes a /: #{file}", true)
       location = File.join(folder, file)
 
-      log_info("Dumping #{uid} to #{location}")
+      $log.debug("Dumping #{uid} to #{location}")
       FileUtils.mkdir_p(folder)
       File.open(location + '.eml', 'w') do |f|
         f.write(raw)
@@ -57,13 +56,13 @@ module GmailArchiver
       last = max_id + slice_size
       slice = (max_id+1..last)
 
-      log_ann("Fetching messages #{slice}")
+      $log.info("Fetching messages #{slice}")
       unless result = @imap.uid_fetch(slice, ['RFC822', 'UID', 'X-GM-THRID', 'X-GM-LABELS', 'X-GM-MSGID'])
         if last < @max_known
-          log_warn("Empty slice found (slice ending at #{last}, max_known is #{@max_known.inspect})")
+          $log.warn("Empty slice found (slice ending at #{last}, max_known is #{@max_known.inspect})")
           result = []
         else
-          log_ann("No messages found (slice ending at #{last}, max_known is #{@max_known.inspect})")
+          $log.info("No messages found (slice ending at #{last}, max_known is #{@max_known.inspect})")
           raise OutOfMessages # might happen with an empty slice that isn't at the end; be careful
         end
       end
@@ -73,7 +72,7 @@ module GmailArchiver
     end
 
     def store_next_slice(result)
-      log_ann("Storing #{result.length} messages")
+      $log.info("Storing #{result.length} messages")
       result.each do |message|
         data = message.attr
         uid = data['UID']
@@ -85,11 +84,11 @@ module GmailArchiver
     def find_max_known
       most_recent = @imap.uid_fetch(-1, 'UID')
       @max_known = most_recent[0].attr['UID']
-      log_ann("Maximum known UID is #{@max_known}")
+      $log.info("Maximum known UID is #{@max_known}")
     end
 
     def do_run
-      log_ann("Starting fetch of all slices past #{max_id}")
+      $log.info("Starting fetch of all slices past #{max_id}")
       # @storer = start_storer
       begin
         login
@@ -106,7 +105,7 @@ module GmailArchiver
         end
       rescue OutOfMessages
       rescue EOFError, IOError, Net::IMAP::ByeResponseError => e # imap lib dying
-        log_error("Error; about to sleep and retry", e)
+        $log.error("Error; about to sleep and retry", e)
         sleep(10)
         retry
       end

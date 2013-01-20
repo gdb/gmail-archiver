@@ -10,7 +10,6 @@ require 'json'
 module GmailArchiver
   class GmailDeleteRunner < AbstractRunner
     LABEL_WHITELIST = ['To', 'Sent', 'Important'] # Should really be To Me, but spaces in labels are messed up
-    include StripeContext::Log::Loggable
     include GmailArchiver::IMAP
 
     def initialize(username, password, delete_until)
@@ -44,7 +43,7 @@ module GmailArchiver
         next unless meta
         LABEL_WHITELIST.each do |label|
           if meta["X-GM-LABELS"].include?(label)
-            log_ann("Skipping #{i} because it is labeled #{label}: (#{meta["X-GM-LABELS"].inspect})")
+            $log.info("Skipping #{i} because it is labeled #{label}: (#{meta["X-GM-LABELS"].inspect})")
             ok = false
             break
           end
@@ -74,7 +73,7 @@ module GmailArchiver
       slice = next_slice(start, stop)
       skipped = (start..stop).to_a - slice
 
-      log_ann("Deleting messages from #{start}-#{stop} except #{skipped.inspect}")
+      $log.info("Deleting messages from #{start}-#{stop} except #{skipped.inspect}")
       result = @imap.uid_copy(slice, '[Gmail]/Trash')
 
       update_max_id(stop)
@@ -95,7 +94,7 @@ module GmailArchiver
           messages_dir = path('messages')
           max_dir_number = find_max(messages_dir)
           max_known = find_max(File.join(messages_dir, max_dir_number.to_s))
-          log_ann("Maximum known UID is #{max_known}")
+          $log.info("Maximum known UID is #{max_known}")
           max_known
         end
     end
@@ -105,7 +104,7 @@ module GmailArchiver
     end
 
     def do_run
-      log_ann("Starting to delete slices past #{max_id} up to #{delete_until} (have downloaded until #{max_known})")
+      $log.info("Starting to delete slices past #{max_id} up to #{delete_until} (have downloaded until #{max_known})")
       # @storer = start_storer
       begin
         login
@@ -119,7 +118,7 @@ module GmailArchiver
           checkpoint_db
         end
       rescue EOFError, IOError, Net::IMAP::ByeResponseError, Net::IMAP::NoResponseError => e # imap lib dying
-        log_error("Error; about to sleep and retry", e)
+        $log.error("Error; about to sleep and retry", e)
         sleep(10)
         retry
       end

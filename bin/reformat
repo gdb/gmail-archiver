@@ -10,8 +10,6 @@ require File.expand_path(File.join(File.dirname(__FILE__), '../lib/gmail-archive
 
 module GmailArchiver
   class ReformatRunner < AbstractRunner
-    include StripeContext::Log::Loggable
-
     def db_file
       path('reformat.db')
     end
@@ -29,12 +27,12 @@ module GmailArchiver
         dir = path(File.join('messages', name))
 
         if processed.include?(dir)
-          log_ann("Skipping already processed dir #{dir}")
+          $log.info("Skipping already processed dir #{dir}")
           next
         end
 
         # TODO: find the actual number of records
-        log_ann("Processing #{dir}")
+        $log.info("Processing #{dir}")
         benchmark(2000000) do
           actual = process(dir)
           [actual, 1000]
@@ -64,7 +62,7 @@ module GmailArchiver
           formatted_year = date.year
 
           if formatted_year < 100
-            log_warn("Message #{id} had a year of #{formatted_year}; adding 2000")
+            $log.warn("Message #{id} had a year of #{formatted_year}; adding 2000")
             formatted_year += 2000
           end
 
@@ -85,7 +83,7 @@ module GmailArchiver
       if subject = parsed.subject
         subject.gsub(/[^\\A-Za-z0-9 ().,_:'"\[\]=!~<>\-]/, '-')[0..100]
       else
-        log_warn("No subject for message #{id}")
+        $log.warn("No subject for message #{id}")
         '(no subject)'
       end
     end
@@ -94,7 +92,7 @@ module GmailArchiver
       assert(!file.include?('/'), "Filename includes a /: #{file}", true)
       location = File.join(folder, file)
 
-      log_info("Dumping #{id} to #{location}")
+      $log.debug("Dumping #{id} to #{location}")
       FileUtils.mkdir_p(folder)
       File.open(location, 'w') do |f|
         f.write(contents)
