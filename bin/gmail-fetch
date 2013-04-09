@@ -26,7 +26,7 @@ module GmailArchiver
     end
 
     def max_id
-      @db['max_id'] || 0
+      @db['max_id'] ||= find_min_known
     end
 
     def update_max_id(uid)
@@ -81,6 +81,13 @@ module GmailArchiver
       end
     end
 
+    def find_min_known
+      least_recent = @imap.fetch(1, 'UID')
+      min_known = least_recent[0].attr['UID']
+      $log.info("Minimum known UID is #{min_known}; starting from one before")
+      min_known - 1
+    end
+
     def find_max_known
       most_recent = @imap.uid_fetch(-1, 'UID')
       @max_known = most_recent[0].attr['UID']
@@ -88,11 +95,12 @@ module GmailArchiver
     end
 
     def do_run
-      $log.info("Starting fetch of all slices past #{max_id}")
       # @storer = start_storer
       begin
         login
         select
+
+        $log.info("Starting fetch of all slices past #{max_id}")
         find_max_known
 
         while true
